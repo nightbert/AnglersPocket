@@ -232,7 +232,7 @@ local function CreateButton()
   button = CreateFrame("Button", "AnglersPocketButton", UIParent, "SecureActionButtonTemplate")
   button:SetSize(db.size, db.size)
   button:SetAttribute("type", "spell")
-  button:RegisterForClicks("AnyUp")
+  button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   button:SetMovable(true)
   button:RegisterForDrag("LeftButton")
   button:EnableMouse(true)
@@ -296,7 +296,7 @@ local function CreateBaitButtons()
     )
     baitButton:SetSize(baitSize, baitSize)
     baitButton:SetAttribute("type", "macro")
-    baitButton:RegisterForClicks("AnyUp")
+    baitButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     baitButton:EnableMouse(true)
 
     baitButton.icon = baitButton:CreateTexture(nil, "ARTWORK")
@@ -436,7 +436,7 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
   end
 
   if event == "PLAYER_EQUIPMENT_CHANGED" then
-    local slotId = ...
+    local slotId = arg1
     if slotId == 16 then
       UpdateButton()
       UpdateBaitButtons()
