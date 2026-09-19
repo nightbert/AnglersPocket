@@ -1,25 +1,43 @@
 local addonName = ...
 
+-- Item APIs live under C_Item on newer clients and are globals on older ones.
+local GetItemInfoInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+local GetItemIcon = (C_Item and C_Item.GetItemIconByID) or GetItemIcon
+local GetItemCount = (C_Item and C_Item.GetItemCount) or GetItemCount
+
+-- Only the spell name is needed; legacy GetSpellInfo returns it first.
+local GetSpellName = (C_Spell and C_Spell.GetSpellName) or GetSpellInfo
+local GetSpellTexture = (C_Spell and C_Spell.GetSpellTexture) or GetSpellTexture
+
 local FISHING_SPELL_ID = 7620
-local FISHING_POLES = {
-  [6256] = true,
-  [6367] = true,
-  [6365] = true,
-  [6366] = true,
-  [19022] = true,
-  [19970] = true,
-  [25978] = true,
-  [12225] = true,
-}
+local ITEM_CLASS_WEAPON = (Enum and Enum.ItemClass and Enum.ItemClass.Weapon)
+  or LE_ITEM_CLASS_WEAPON
+  or 2
+local ITEM_SUBCLASS_FISHING_POLE = (Enum and Enum.ItemWeaponSubclass and Enum.ItemWeaponSubclass.Fishingpole)
+  or LE_ITEM_WEAPON_FISHINGPOLE
+  or 20
 
 local BAIT_ITEMS = {
-  6529,
-  6530,
-  6532,
-  6533,
-  6811,
-  7307,
-  34861,
+  -- Classic
+  6529, -- Shiny Bauble
+  6530, -- Nightcrawlers
+  6532, -- Bright Baubles
+  6533, -- Aquadynamic Fish Attractor
+  6811, -- Aquadynamic Fish Lens
+  7307, -- Flesh Eating Worm
+
+  -- The Burning Crusade
+  34861, -- Sharpened Fish Hook
+
+  -- Wrath of the Lich King
+  46006, -- Glow Worm
+
+  -- Cataclysm
+  62673, -- Feathered Lure
+  67404, -- Glass Fishing Bobber
+  68049, -- Heat-Treated Spinning Lure
+
 }
 
 local defaults = {
@@ -73,7 +91,12 @@ end
 
 local function IsFishingPoleEquipped()
   local itemId = GetInventoryItemID("player", 16)
-  return itemId and FISHING_POLES[itemId] or false
+  if not itemId then
+    return false
+  end
+
+  local _, _, _, _, _, classId, subClassId = GetItemInfoInstant(itemId)
+  return classId == ITEM_CLASS_WEAPON and subClassId == ITEM_SUBCLASS_FISHING_POLE
 end
 
 local function GetItemIconById(itemId)
@@ -130,7 +153,7 @@ local function UpdateButton()
 
   pendingUpdate = false
   if IsFishingPoleEquipped() then
-    local spellName = GetSpellInfo(FISHING_SPELL_ID)
+    local spellName = GetSpellName(FISHING_SPELL_ID)
     if spellName then
       button:SetAttribute("spell", spellName)
       button:Show()
@@ -232,7 +255,8 @@ local function CreateButton()
   button = CreateFrame("Button", "AnglersPocketButton", UIParent, "SecureActionButtonTemplate")
   button:SetSize(db.size, db.size)
   button:SetAttribute("type", "spell")
-  button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+  -- Secure actions select down or up according to ActionButtonUseKeyDown.
+  button:RegisterForClicks("LeftButtonDown", "LeftButtonUp", "RightButtonDown", "RightButtonUp")
   button:SetMovable(true)
   button:RegisterForDrag("LeftButton")
   button:EnableMouse(true)
@@ -261,7 +285,7 @@ local function CreateButton()
     if GameTooltip.SetSpellByID then
       GameTooltip:SetSpellByID(FISHING_SPELL_ID)
     else
-      local spellName = GetSpellInfo(FISHING_SPELL_ID) or "Fishing"
+      local spellName = GetSpellName(FISHING_SPELL_ID) or "Fishing"
       GameTooltip:SetText(spellName)
     end
     GameTooltip:Show()
@@ -296,7 +320,7 @@ local function CreateBaitButtons()
     )
     baitButton:SetSize(baitSize, baitSize)
     baitButton:SetAttribute("type", "macro")
-    baitButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    baitButton:RegisterForClicks("LeftButtonDown", "LeftButtonUp", "RightButtonDown", "RightButtonUp")
     baitButton:EnableMouse(true)
 
     baitButton.icon = baitButton:CreateTexture(nil, "ARTWORK")
