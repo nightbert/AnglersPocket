@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+- Add a key binding to cast Fishing, set via a button in the config window (left-click and press a key, right-click to clear).
+- Add a button size slider and an option to show the baits beside the Fishing button instead of below it.
+- Add optional sound adjustment while a fishing pole is equipped, with sliders for effects, music and ambience volume (off by default). Previous volumes are restored on unequip and logout, and a volume you changed yourself in the meantime is kept.
+- Add an optional pulsing highlight on the bait buttons while no bait is applied (config window or `/ap glow`, off by default).
+- Replace the cooldown swipe on the Fishing button with a small remaining-time text in the corner (red below one minute). The icon stays fully visible and no longer looks unusable, and the black corners are gone.
+- Keep bait counts up to date during combat; a bait used up mid-fight is shown greyed out until combat ends.
+
 ## 1.2.0
 - Add support for the current WoW Forever beta (16001).
 - Add compatibility with the modern `C_Item` and `C_Spell` APIs while retaining fallbacks for older clients.

@@ -1,14 +1,15 @@
 local addonName = ...
 
--- Item APIs live under C_Item on newer clients and are globals on older ones.
 local GetItemInfoInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 local GetItemIcon = (C_Item and C_Item.GetItemIconByID) or GetItemIcon
 local GetItemCount = (C_Item and C_Item.GetItemCount) or GetItemCount
 
--- Only the spell name is needed; legacy GetSpellInfo returns it first.
 local GetSpellName = (C_Spell and C_Spell.GetSpellName) or GetSpellInfo
 local GetSpellTexture = (C_Spell and C_Spell.GetSpellTexture) or GetSpellTexture
+
+local GetCVar = (C_CVar and C_CVar.GetCVar) or GetCVar
+local SetCVar = (C_CVar and C_CVar.SetCVar) or SetCVar
 
 local FISHING_SPELL_ID = 7620
 local ITEM_CLASS_WEAPON = (Enum and Enum.ItemClass and Enum.ItemClass.Weapon)
@@ -40,8 +41,29 @@ local BAIT_ITEMS = {
 
 }
 
+local TIMER_INTERVAL = 0.5
+local TIMER_WARNING_SECONDS = 60
+
+local SIZE_MIN, SIZE_MAX, SIZE_STEP = 24, 64, 2
+local BAIT_SCALE = 0.75
+local GLOW_SCALE = 1.75
+
+local SOUND_SETTINGS = {
+  { key = "sfx", cvar = "Sound_SFXVolume", label = "Effects volume" },
+  { key = "music", cvar = "Sound_MusicVolume", label = "Music volume" },
+  { key = "ambience", cvar = "Sound_AmbienceVolume", label = "Ambience volume" },
+}
+
 local defaults = {
   locked = true,
+  baitGlow = false,
+  horizontal = false,
+  fishingSound = {
+    enabled = false,
+    sfx = 1,
+    music = 0,
+    ambience = 0.3,
+  },
   size = 36,
   position = {
     point = "CENTER",
@@ -57,10 +79,10 @@ local baitButtons = {}
 local configFrame
 local pendingUpdate = false
 local pendingBaitUpdate = false
+local pendingLayout = false
 
-local baitEnchantDuration
-local baitLastTimeLeft
-local UpdateFishingCooldown
+local UpdateBaitTimer
+local UpdateBaitButtons
 
 local function ApplyDefaults(destination, source)
   if type(destination) ~= "table" then
@@ -137,8 +159,68 @@ local function ApplyPosition()
   button:SetPoint(pos.point, UIParent, pos.relPoint, pos.x, pos.y)
 end
 
-local function SetLocked(locked)
-  db.locked = locked and true or false
+local function ResetPosition()
+  for key, value in pairs(defaults.position) do
+    db.position[key] = value
+  end
+  ApplyPosition()
+end
+
+local function FormatVolume(value)
+  return string.format("%.2f", value)
+end
+
+local function UpdateFishingSound(forceRestore)
+  if not db then
+    return
+  end
+
+  local settings = db.fishingSound
+  local active = not forceRestore and settings.enabled and IsFishingPoleEquipped()
+
+  if active then
+    if not db.savedVolumes then
+      local saved = {}
+      for _, entry in ipairs(SOUND_SETTINGS) do
+        saved[entry.cvar] = GetCVar(entry.cvar)
+      end
+      db.savedVolumes = saved
+    end
+    for _, entry in ipairs(SOUND_SETTINGS) do
+      if db.savedVolumes[entry.cvar] then
+        SetCVar(entry.cvar, FormatVolume(settings[entry.key]))
+      end
+    end
+  elseif db.savedVolumes then
+    for _, entry in ipairs(SOUND_SETTINGS) do
+      local original = db.savedVolumes[entry.cvar]
+      local current = tonumber(GetCVar(entry.cvar))
+      if original and current and math.abs(current - settings[entry.key]) < 0.01 then
+        SetCVar(entry.cvar, original)
+      end
+    end
+    db.savedVolumes = nil
+  end
+end
+
+local function ApplyLayout()
+  if not button then
+    return
+  end
+
+  if InCombatLockdown and InCombatLockdown() then
+    pendingLayout = true
+    return
+  end
+
+  pendingLayout = false
+  button:SetSize(db.size, db.size)
+  local baitSize = db.size * BAIT_SCALE
+  for _, baitButton in ipairs(baitButtons) do
+    baitButton:SetSize(baitSize, baitSize)
+    baitButton.glow:SetSize(baitSize * GLOW_SCALE, baitSize * GLOW_SCALE)
+  end
+  UpdateBaitButtons()
 end
 
 local function UpdateButton()
@@ -157,60 +239,104 @@ local function UpdateButton()
     if spellName then
       button:SetAttribute("spell", spellName)
       button:Show()
-      UpdateFishingCooldown()
+      UpdateBaitTimer()
       return
     end
   end
 
+  button:SetAttribute("spell", nil)
   button:Hide()
 end
 
-UpdateFishingCooldown = function()
-  if not button or not button:IsShown() then
-    if button and button.cooldown then
-      button.cooldown:Hide()
+local function SetLocked(locked)
+  db.locked = locked and true or false
+end
+
+local function FormatTimeLeft(seconds)
+  if seconds >= TIMER_WARNING_SECONDS then
+    return string.format("%dm", math.ceil(seconds / 60))
+  end
+  return string.format("%ds", math.ceil(seconds))
+end
+
+local function SetBaitGlow(show)
+  for _, baitButton in ipairs(baitButtons) do
+    local glow = baitButton.glow
+    if show then
+      if not glow:IsShown() then
+        glow:Show()
+        if glow.pulse then
+          glow.pulse:Play()
+        end
+      end
+    elseif glow:IsShown() then
+      if glow.pulse then
+        glow.pulse:Stop()
+      end
+      glow:Hide()
     end
-    baitEnchantDuration = nil
-    baitLastTimeLeft = nil
+  end
+end
+
+UpdateBaitTimer = function()
+  if not button or not button.timer then
     return
   end
 
-  local hasMainHandEnchant, timeLeftMs = GetWeaponEnchantInfo()
-  if not hasMainHandEnchant or not timeLeftMs or timeLeftMs <= 0 then
-    baitEnchantDuration = nil
-    baitLastTimeLeft = nil
-    button.cooldown:Hide()
-    return
+  local timeLeftMs
+  if button:IsShown() then
+    local hasMainHandEnchant, mainHandTimeLeft = GetWeaponEnchantInfo()
+    if hasMainHandEnchant and mainHandTimeLeft and mainHandTimeLeft > 0 then
+      timeLeftMs = mainHandTimeLeft
+    end
   end
 
-  local timeLeft = timeLeftMs / 1000
-  if not baitEnchantDuration or not baitLastTimeLeft or timeLeft > baitLastTimeLeft + 2 then
-    baitEnchantDuration = timeLeft
+  if timeLeftMs then
+    local seconds = timeLeftMs / 1000
+    button.timer:SetText(FormatTimeLeft(seconds))
+    if seconds < TIMER_WARNING_SECONDS then
+      button.timer:SetTextColor(1, 0.2, 0.2)
+    else
+      button.timer:SetTextColor(1, 1, 1)
+    end
+    button.timer:Show()
+  else
+    button.timer:Hide()
   end
-  baitLastTimeLeft = timeLeft
 
-  local duration = baitEnchantDuration or timeLeft
-  local start = GetTime() - math.max(duration - timeLeft, 0)
-  CooldownFrame_Set(button.cooldown, start, duration, true)
-  button.cooldown:Show()
+  SetBaitGlow(db.baitGlow and button:IsShown() and not timeLeftMs)
 end
 
 local function PositionBaitButtons(visibleButtons)
   local anchor = button
   for _, baitButton in ipairs(visibleButtons) do
     baitButton:ClearAllPoints()
-    baitButton:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
+    if db.horizontal then
+      baitButton:SetPoint("LEFT", anchor, "RIGHT", 2, 0)
+    else
+      baitButton:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
+    end
     anchor = baitButton
   end
 end
 
-local function UpdateBaitButtons()
+local function SetBaitCount(baitButton, count)
+  baitButton.count:SetText(count > 1 and count or "")
+  baitButton.icon:SetDesaturated(count == 0)
+end
+
+UpdateBaitButtons = function()
   if #baitButtons == 0 then
     return
   end
 
   if InCombatLockdown and InCombatLockdown() then
     pendingBaitUpdate = true
+    for _, baitButton in ipairs(baitButtons) do
+      if baitButton.itemId then
+        SetBaitCount(baitButton, GetItemCount(baitButton.itemId) or 0)
+      end
+    end
     return
   end
 
@@ -220,7 +346,7 @@ local function UpdateBaitButtons()
       baitButton.itemId = nil
       baitButton:Hide()
     end
-    UpdateFishingCooldown()
+    UpdateBaitTimer()
     return
   end
 
@@ -231,20 +357,20 @@ local function UpdateBaitButtons()
     if count and count > 0 then
       baitButton.itemId = itemId
       baitButton.icon:SetTexture(GetItemIconById(itemId) or "Interface/Icons/INV_Misc_QuestionMark")
-      baitButton.count:SetText(count > 1 and count or "")
+      SetBaitCount(baitButton, count)
       baitButton:SetAttribute("macrotext", string.format("/use item:%d\n/use 16", itemId))
       baitButton:Show()
       visibleButtons[#visibleButtons + 1] = baitButton
     else
       baitButton.itemId = nil
-      baitButton.count:SetText("")
+      SetBaitCount(baitButton, 0)
       baitButton:SetAttribute("macrotext", nil)
       baitButton:Hide()
     end
   end
 
   PositionBaitButtons(visibleButtons)
-  UpdateFishingCooldown()
+  UpdateBaitTimer()
 end
 
 local function CreateButton()
@@ -255,7 +381,6 @@ local function CreateButton()
   button = CreateFrame("Button", "AnglersPocketButton", UIParent, "SecureActionButtonTemplate")
   button:SetSize(db.size, db.size)
   button:SetAttribute("type", "spell")
-  -- Secure actions select down or up according to ActionButtonUseKeyDown.
   button:RegisterForClicks("LeftButtonDown", "LeftButtonUp", "RightButtonDown", "RightButtonUp")
   button:SetMovable(true)
   button:RegisterForDrag("LeftButton")
@@ -264,6 +389,10 @@ local function CreateButton()
   button.icon = button:CreateTexture(nil, "ARTWORK")
   button.icon:SetAllPoints()
   button.icon:SetTexture(GetSpellTexture(FISHING_SPELL_ID) or "Interface/Icons/Trade_Fishing")
+
+  button.timer = button:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+  button.timer:SetPoint("BOTTOMRIGHT", -2, 2)
+  button.timer:Hide()
 
   button:SetHighlightTexture("Interface/Buttons/ButtonHilight-Square", "ADD")
 
@@ -295,11 +424,15 @@ local function CreateButton()
     GameTooltip:Hide()
   end)
 
-  button.cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
-  button.cooldown:SetAllPoints()
-  if button.cooldown.SetHideCountdownNumbers then
-    button.cooldown:SetHideCountdownNumbers(false)
-  end
+  local ticker = CreateFrame("Frame", nil, button)
+  local sinceLastTick = 0
+  ticker:SetScript("OnUpdate", function(_, elapsed)
+    sinceLastTick = sinceLastTick + elapsed
+    if sinceLastTick >= TIMER_INTERVAL then
+      sinceLastTick = 0
+      UpdateBaitTimer()
+    end
+  end)
 
   ApplyPosition()
   UpdateButton()
@@ -310,7 +443,7 @@ local function CreateBaitButtons()
     return
   end
 
-  local baitSize = db.size * 0.75
+  local baitSize = db.size * BAIT_SCALE
   for index = 1, #BAIT_ITEMS do
     local baitButton = CreateFrame(
       "Button",
@@ -333,6 +466,26 @@ local function CreateBaitButtons()
 
     baitButton:SetHighlightTexture("Interface/Buttons/ButtonHilight-Square", "ADD")
 
+    local glow = baitButton:CreateTexture(nil, "OVERLAY")
+    glow:SetTexture("Interface/Buttons/UI-ActionButton-Border")
+    glow:SetBlendMode("ADD")
+    glow:SetVertexColor(1, 0.82, 0)
+    glow:SetSize(baitSize * GLOW_SCALE, baitSize * GLOW_SCALE)
+    glow:SetPoint("CENTER")
+    glow:Hide()
+    if glow.CreateAnimationGroup then
+      local pulse = glow:CreateAnimationGroup()
+      pulse:SetLooping("BOUNCE")
+      local fade = pulse:CreateAnimation("Alpha")
+      if fade.SetFromAlpha then
+        fade:SetFromAlpha(1)
+        fade:SetToAlpha(0.3)
+      end
+      fade:SetDuration(0.6)
+      glow.pulse = pulse
+    end
+    baitButton.glow = glow
+
     baitButton:SetScript("OnEnter", function(self)
       if self.itemId then
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -350,13 +503,125 @@ local function CreateBaitButtons()
   end
 end
 
+local function CreateCheckbox(parent, labelText, onClick)
+  local check = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+  check:SetScript("OnClick", function(self)
+    onClick(self:GetChecked() and true or false)
+  end)
+
+  local label = check:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  label:SetPoint("LEFT", check, "RIGHT", 4, 0)
+  label:SetText(labelText)
+  return check
+end
+
+local function CreateSlider(parent, labelText, minValue, maxValue, step, formatValue, onChange)
+  local slider = CreateFrame("Slider", nil, parent)
+  slider:SetOrientation("HORIZONTAL")
+  slider:SetSize(240, 16)
+  slider:SetMinMaxValues(minValue, maxValue)
+  slider:SetValueStep(step)
+  if slider.SetObeyStepOnDrag then
+    slider:SetObeyStepOnDrag(true)
+  end
+  slider:EnableMouse(true)
+
+  local track = slider:CreateTexture(nil, "BACKGROUND")
+  if track.SetColorTexture then
+    track:SetColorTexture(0, 0, 0, 0.6)
+  else
+    track:SetTexture(0, 0, 0, 0.6)
+  end
+  track:SetPoint("LEFT")
+  track:SetPoint("RIGHT")
+  track:SetHeight(6)
+
+  slider:SetThumbTexture("Interface/Buttons/UI-SliderBar-Button-Horizontal")
+
+  local label = slider:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  label:SetPoint("BOTTOMLEFT", slider, "TOPLEFT", 0, 2)
+  label:SetText(labelText)
+
+  local valueText = slider:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  valueText:SetPoint("BOTTOMRIGHT", slider, "TOPRIGHT", 0, 2)
+
+  slider:SetScript("OnValueChanged", function(self, value)
+    value = math.floor(value / step + 0.5) * step
+    valueText:SetText(formatValue(value))
+    if not self.silent then
+      onChange(value)
+    end
+  end)
+
+  function slider:SetValueSilently(value)
+    self.silent = true
+    self:SetValue(value)
+    self.silent = false
+    valueText:SetText(formatValue(value))
+  end
+
+  return slider
+end
+
+local function FormatPercent(value)
+  return string.format("%d%%", value)
+end
+
+local BINDING_COMMAND = "CLICK AnglersPocketButton:LeftButton"
+local MODIFIER_KEYS = {
+  LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true,
+  LALT = true, RALT = true, LMETA = true, RMETA = true, UNKNOWN = true,
+}
+
+local function GetFishingKeyText()
+  return GetBindingKey(BINDING_COMMAND) or "Not bound"
+end
+
+local function BuildKeyString(key)
+  local prefix = ""
+  if IsAltKeyDown() then
+    prefix = prefix .. "ALT-"
+  end
+  if IsControlKeyDown() then
+    prefix = prefix .. "CTRL-"
+  end
+  if IsShiftKeyDown() then
+    prefix = prefix .. "SHIFT-"
+  end
+  return prefix .. key
+end
+
+local function SetFishingKey(key)
+  if InCombatLockdown and InCombatLockdown() then
+    print("Angler's Pocket: key bindings cannot be changed in combat.")
+    return
+  end
+
+  for _, oldKey in ipairs({ GetBindingKey(BINDING_COMMAND) }) do
+    SetBinding(oldKey)
+  end
+
+  if key then
+    local previousAction = GetBindingAction(key)
+    if SetBinding(key, BINDING_COMMAND) then
+      if previousAction and previousAction ~= "" and previousAction ~= BINDING_COMMAND then
+        print(string.format("Angler's Pocket: %s now casts Fishing (was: %s).", key, previousAction))
+      end
+    else
+      print(string.format("Angler's Pocket: %s could not be bound.", key))
+    end
+  end
+
+  SaveBindings(GetCurrentBindingSet())
+end
+
 local function CreateConfigFrame()
   if configFrame then
     return
   end
 
   configFrame = CreateFrame("Frame", "AnglersPocketConfig", UIParent, "BasicFrameTemplateWithInset")
-  configFrame:SetSize(260, 150)
+  configFrame:SetSize(290, 460)
   configFrame:SetPoint("CENTER")
   configFrame:Hide()
 
@@ -366,30 +631,119 @@ local function CreateConfigFrame()
 
   local info = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   info:SetPoint("TOPLEFT", 12, -30)
-  info:SetWidth(230)
+  info:SetWidth(260)
   info:SetJustifyH("LEFT")
-  info:SetText("Unlock the button to drag it on the screen.")
 
-  local unlock = CreateFrame("CheckButton", nil, configFrame, "UICheckButtonTemplate")
+  local unlock = CreateCheckbox(configFrame, "Unlock button", function(checked)
+    SetLocked(not checked)
+  end)
   unlock:SetPoint("TOPLEFT", info, "BOTTOMLEFT", -4, -6)
-  unlock:SetScript("OnClick", function(self)
-    SetLocked(not self:GetChecked())
+
+  local glowCheck = CreateCheckbox(configFrame, "Highlight baits when none is applied", function(checked)
+    db.baitGlow = checked
+    UpdateBaitTimer()
+  end)
+  glowCheck:SetPoint("TOPLEFT", unlock, "BOTTOMLEFT", 0, 2)
+
+  local horizontalCheck = CreateCheckbox(configFrame, "Show baits beside the button", function(checked)
+    db.horizontal = checked
+    ApplyLayout()
+  end)
+  horizontalCheck:SetPoint("TOPLEFT", glowCheck, "BOTTOMLEFT", 0, 2)
+
+  local keyLabel = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  keyLabel:SetPoint("TOPLEFT", horizontalCheck, "BOTTOMLEFT", 6, -12)
+  keyLabel:SetText("Cast key:")
+
+  local keyButton = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
+  keyButton:SetSize(150, 22)
+  keyButton:SetPoint("LEFT", keyLabel, "RIGHT", 8, 0)
+  keyButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+  local function StopKeyCapture()
+    keyButton.capturing = false
+    keyButton:EnableKeyboard(false)
+    keyButton:SetText(GetFishingKeyText())
+  end
+
+  keyButton:SetScript("OnClick", function(self, mouseButton)
+    if mouseButton == "RightButton" then
+      SetFishingKey(nil)
+      StopKeyCapture()
+    elseif self.capturing then
+      StopKeyCapture()
+    else
+      self.capturing = true
+      self:EnableKeyboard(true)
+      self:SetText("Press a key...")
+    end
   end)
 
-  local unlockLabel = unlock:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  unlockLabel:SetPoint("LEFT", unlock, "RIGHT", 4, 0)
-  unlockLabel:SetText("Unlock button")
+  keyButton:SetScript("OnKeyDown", function(self, key)
+    if not self.capturing or MODIFIER_KEYS[key] then
+      return
+    end
+    if key ~= "ESCAPE" then
+      SetFishingKey(BuildKeyString(key))
+    end
+    StopKeyCapture()
+  end)
+
+  keyButton:SetScript("OnHide", StopKeyCapture)
+
+  keyButton:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Cast key")
+    GameTooltip:AddLine("Left-click, then press a key (with Shift/Ctrl/Alt if you like). Escape cancels. Right-click removes the binding.", 1, 1, 1, true)
+    GameTooltip:Show()
+  end)
+
+  keyButton:SetScript("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+
+  local sizeSlider = CreateSlider(configFrame, "Button size", SIZE_MIN, SIZE_MAX, SIZE_STEP, tostring, function(value)
+    db.size = value
+    ApplyLayout()
+  end)
+  sizeSlider:SetPoint("TOPLEFT", keyLabel, "BOTTOMLEFT", 0, -28)
+
+  local soundHeader = configFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  soundHeader:SetPoint("TOPLEFT", sizeSlider, "BOTTOMLEFT", 0, -16)
+  soundHeader:SetText("Sound while fishing")
+
+  local soundSliders = {}
+  local function UpdateSoundSlidersAlpha()
+    for _, slider in ipairs(soundSliders) do
+      slider:SetAlpha(db.fishingSound.enabled and 1 or 0.4)
+    end
+  end
+
+  local soundCheck = CreateCheckbox(configFrame, "Adjust volumes while a pole is equipped", function(checked)
+    db.fishingSound.enabled = checked
+    UpdateSoundSlidersAlpha()
+    UpdateFishingSound()
+  end)
+  soundCheck:SetPoint("TOPLEFT", soundHeader, "BOTTOMLEFT", -6, -2)
+
+  local anchor = soundCheck
+  for index, entry in ipairs(SOUND_SETTINGS) do
+    local slider = CreateSlider(configFrame, entry.label, 0, 100, 5, FormatPercent, function(value)
+      db.fishingSound[entry.key] = value / 100
+      UpdateFishingSound()
+    end)
+    slider:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", index == 1 and 6 or 0, -20)
+    slider.settingKey = entry.key
+    soundSliders[#soundSliders + 1] = slider
+    anchor = slider
+  end
 
   local resetButton = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
-  resetButton:SetSize(140, 22)
-  resetButton:SetPoint("TOPLEFT", unlock, "BOTTOMLEFT", 4, -8)
+  resetButton:SetSize(120, 22)
+  resetButton:SetPoint("BOTTOMLEFT", 12, 12)
   resetButton:SetText("Reset position")
   resetButton:SetScript("OnClick", function()
-    db.position.point = defaults.position.point
-    db.position.relPoint = defaults.position.relPoint
-    db.position.x = defaults.position.x
-    db.position.y = defaults.position.y
-    ApplyPosition()
+    ResetPosition()
   end)
 
   local closeButton = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
@@ -402,6 +756,15 @@ local function CreateConfigFrame()
 
   configFrame:SetScript("OnShow", function()
     unlock:SetChecked(not db.locked)
+    glowCheck:SetChecked(db.baitGlow)
+    horizontalCheck:SetChecked(db.horizontal)
+    StopKeyCapture()
+    sizeSlider:SetValueSilently(db.size)
+    soundCheck:SetChecked(db.fishingSound.enabled)
+    for _, slider in ipairs(soundSliders) do
+      slider:SetValueSilently(math.floor(db.fishingSound[slider.settingKey] * 100 + 0.5))
+    end
+    UpdateSoundSlidersAlpha()
   end)
 end
 
@@ -416,12 +779,15 @@ SlashCmdList.ANGLERSPOCKET = function(msg)
     end
   elseif msg == "lock" then
     SetLocked(true)
+  elseif msg == "glow" then
+    db.baitGlow = not db.baitGlow
+    UpdateBaitTimer()
+    print("Angler's Pocket: bait highlight " .. (db.baitGlow and "enabled" or "disabled"))
+    if configFrame and configFrame:IsShown() then
+      configFrame:GetScript("OnShow")(configFrame)
+    end
   elseif msg == "reset" then
-    db.position.point = defaults.position.point
-    db.position.relPoint = defaults.position.relPoint
-    db.position.x = defaults.position.x
-    db.position.y = defaults.position.y
-    ApplyPosition()
+    ResetPosition()
   else
     if not configFrame then
       CreateConfigFrame()
@@ -442,6 +808,7 @@ events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 events:RegisterEvent("BAG_UPDATE_DELAYED")
 events:RegisterEvent("SPELLS_CHANGED")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterEvent("PLAYER_LOGOUT")
 
 events:SetScript("OnEvent", function(_, event, arg1, ...)
   if event == "ADDON_LOADED" and arg1 == addonName then
@@ -456,6 +823,7 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
     ApplyPosition()
     UpdateButton()
     UpdateBaitButtons()
+    UpdateFishingSound()
     return
   end
 
@@ -464,7 +832,13 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
     if slotId == 16 then
       UpdateButton()
       UpdateBaitButtons()
+      UpdateFishingSound()
     end
+    return
+  end
+
+  if event == "PLAYER_LOGOUT" then
+    UpdateFishingSound(true)
     return
   end
 
@@ -483,7 +857,9 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
     if pendingUpdate then
       UpdateButton()
     end
-    if pendingBaitUpdate then
+    if pendingLayout then
+      ApplyLayout()
+    elseif pendingBaitUpdate then
       UpdateBaitButtons()
     end
   end
