@@ -238,6 +238,8 @@ local function UpdateButton()
     local spellName = GetSpellName(FISHING_SPELL_ID)
     if spellName then
       button:SetAttribute("spell", spellName)
+      button.preview = false
+      button.icon:SetDesaturated(false)
       button:Show()
       UpdateBaitTimer()
       return
@@ -245,11 +247,20 @@ local function UpdateButton()
   end
 
   button:SetAttribute("spell", nil)
+  if not db.locked then
+    button.preview = true
+    button.icon:SetDesaturated(true)
+    button:Show()
+    UpdateBaitTimer()
+    return
+  end
   button:Hide()
 end
 
 local function SetLocked(locked)
   db.locked = locked and true or false
+  UpdateButton()
+  UpdateBaitButtons()
 end
 
 local function FormatTimeLeft(seconds)
@@ -283,8 +294,9 @@ UpdateBaitTimer = function()
     return
   end
 
+  local active = button:IsShown() and not button.preview
   local timeLeftMs
-  if button:IsShown() then
+  if active then
     local hasMainHandEnchant, mainHandTimeLeft = GetWeaponEnchantInfo()
     if hasMainHandEnchant and mainHandTimeLeft and mainHandTimeLeft > 0 then
       timeLeftMs = mainHandTimeLeft
@@ -304,7 +316,7 @@ UpdateBaitTimer = function()
     button.timer:Hide()
   end
 
-  SetBaitGlow(db.baitGlow and button:IsShown() and not timeLeftMs)
+  SetBaitGlow(db.baitGlow and active and not timeLeftMs)
 end
 
 local function PositionBaitButtons(visibleButtons)
@@ -417,6 +429,9 @@ local function CreateButton()
       local spellName = GetSpellName(FISHING_SPELL_ID) or "Fishing"
       GameTooltip:SetText(spellName)
     end
+    if not db.locked then
+      GameTooltip:AddLine("Drag to move. Lock the button in the config window (/ap).", 0.6, 0.8, 1, true)
+    end
     GameTooltip:Show()
   end)
 
@@ -528,15 +543,19 @@ local function CreateSlider(parent, labelText, minValue, maxValue, step, formatV
 
   local track = slider:CreateTexture(nil, "BACKGROUND")
   if track.SetColorTexture then
-    track:SetColorTexture(0, 0, 0, 0.6)
+    track:SetColorTexture(0.15, 0.15, 0.15, 0.7)
   else
-    track:SetTexture(0, 0, 0, 0.6)
+    track:SetTexture(0.15, 0.15, 0.15, 0.7)
   end
-  track:SetPoint("LEFT")
-  track:SetPoint("RIGHT")
+  track:SetPoint("LEFT", 10, 0)
+  track:SetPoint("RIGHT", -10, 0)
   track:SetHeight(6)
 
   slider:SetThumbTexture("Interface/Buttons/UI-SliderBar-Button-Horizontal")
+  local thumb = slider:GetThumbTexture()
+  if thumb then
+    thumb:SetSize(32, 32)
+  end
 
   local label = slider:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   label:SetPoint("BOTTOMLEFT", slider, "TOPLEFT", 0, 2)

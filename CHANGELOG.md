@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+- While the button is unlocked it stays visible as a grey preview even without a fishing pole, so it can be moved anywhere. Its tooltip then points out how to lock it again.
+- Fix the slider knobs in the config window sitting too far right; at 100 % the knob was drawn past the end of the bar and could not be dragged.
+- Make the slider bars in the config window slightly lighter so they stand out from the background.
+
 ## 1.3.0
 - Add a key binding to cast Fishing, set via a button in the config window (left-click and press a key, right-click to clear).
 - Add a button size slider and an option to show the baits beside the Fishing button instead of below it.
