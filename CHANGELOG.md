@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0
+- Center the config window title vertically in its header bar.
+- Widen the config window so the "Highlight baits when none is applied" option no longer runs into the window edge.
+- Show a chat message at login pointing to `/ap`. It can be turned off in the config window.
+- The config window can now be moved by dragging it.
+- Shorten the sound option label so it no longer runs past the edge of the config window.
+- Show the slider labels and values in the same text size as the checkbox options.
+- The bait buttons can now also be shown above or to the left of the Fishing button. The checkbox in the config window is replaced by a dropdown; your previous choice is kept.
+- Group the options in the config window into General, Button, Fishing and Sound sections.
+- Add an option to turn on auto loot while a fishing pole is equipped (off by default). The previous setting is restored on unequip and logout, unless you changed it yourself in the meantime.
+
 ## 1.3.1
 - While the button is unlocked it stays visible as a grey preview even without a fishing pole, so it can be moved anywhere. Its tooltip then points out how to lock it again.
 - Fix the slider knobs in the config window sitting too far right; at 100 % the knob was drawn past the end of the bar and could not be dragged.

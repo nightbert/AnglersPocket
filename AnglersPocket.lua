@@ -54,10 +54,19 @@ local SOUND_SETTINGS = {
   { key = "ambience", cvar = "Sound_AmbienceVolume", label = "Ambience volume" },
 }
 
+local BAIT_DIRECTIONS = {
+  { key = "down", label = "Below", point = "TOP", relPoint = "BOTTOM", x = 0, y = -2 },
+  { key = "up", label = "Above", point = "BOTTOM", relPoint = "TOP", x = 0, y = 2 },
+  { key = "left", label = "Left", point = "RIGHT", relPoint = "LEFT", x = -2, y = 0 },
+  { key = "right", label = "Right", point = "LEFT", relPoint = "RIGHT", x = 2, y = 0 },
+}
+
 local defaults = {
   locked = true,
   baitGlow = false,
-  horizontal = false,
+  baitDirection = "down",
+  loginMessage = true,
+  autoLoot = false,
   fishingSound = {
     enabled = false,
     sfx = 1,
@@ -108,7 +117,20 @@ local function EnsureDB()
       AnglersPocketDB = {}
     end
   end
+  if AnglersPocketDB.baitDirection == nil and AnglersPocketDB.horizontal ~= nil then
+    AnglersPocketDB.baitDirection = AnglersPocketDB.horizontal and "right" or "down"
+  end
+  AnglersPocketDB.horizontal = nil
   db = ApplyDefaults(AnglersPocketDB, defaults)
+end
+
+local function GetBaitDirectionIndex()
+  for index, direction in ipairs(BAIT_DIRECTIONS) do
+    if direction.key == db.baitDirection then
+      return index
+    end
+  end
+  return 1
 end
 
 local function IsFishingPoleEquipped()
@@ -200,6 +222,26 @@ local function UpdateFishingSound(forceRestore)
       end
     end
     db.savedVolumes = nil
+  end
+end
+
+local function UpdateAutoLoot(forceRestore)
+  if not db then
+    return
+  end
+
+  local active = not forceRestore and db.autoLoot and IsFishingPoleEquipped()
+
+  if active then
+    if db.savedAutoLoot == nil then
+      db.savedAutoLoot = GetCVar("autoLootDefault")
+    end
+    SetCVar("autoLootDefault", "1")
+  elseif db.savedAutoLoot ~= nil then
+    if GetCVar("autoLootDefault") == "1" then
+      SetCVar("autoLootDefault", db.savedAutoLoot)
+    end
+    db.savedAutoLoot = nil
   end
 end
 
@@ -320,14 +362,11 @@ UpdateBaitTimer = function()
 end
 
 local function PositionBaitButtons(visibleButtons)
+  local direction = BAIT_DIRECTIONS[GetBaitDirectionIndex()]
   local anchor = button
   for _, baitButton in ipairs(visibleButtons) do
     baitButton:ClearAllPoints()
-    if db.horizontal then
-      baitButton:SetPoint("LEFT", anchor, "RIGHT", 2, 0)
-    else
-      baitButton:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
-    end
+    baitButton:SetPoint(direction.point, anchor, direction.relPoint, direction.x, direction.y)
     anchor = baitButton
   end
 end
@@ -533,7 +572,7 @@ end
 local function CreateSlider(parent, labelText, minValue, maxValue, step, formatValue, onChange)
   local slider = CreateFrame("Slider", nil, parent)
   slider:SetOrientation("HORIZONTAL")
-  slider:SetSize(240, 16)
+  slider:SetSize(270, 16)
   slider:SetMinMaxValues(minValue, maxValue)
   slider:SetValueStep(step)
   if slider.SetObeyStepOnDrag then
@@ -557,11 +596,11 @@ local function CreateSlider(parent, labelText, minValue, maxValue, step, formatV
     thumb:SetSize(32, 32)
   end
 
-  local label = slider:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  local label = slider:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   label:SetPoint("BOTTOMLEFT", slider, "TOPLEFT", 0, 2)
   label:SetText(labelText)
 
-  local valueText = slider:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  local valueText = slider:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   valueText:SetPoint("BOTTOMRIGHT", slider, "TOPRIGHT", 0, 2)
 
   slider:SetScript("OnValueChanged", function(self, value)
@@ -640,44 +679,102 @@ local function CreateConfigFrame()
   end
 
   configFrame = CreateFrame("Frame", "AnglersPocketConfig", UIParent, "BasicFrameTemplateWithInset")
-  configFrame:SetSize(290, 460)
+  configFrame:SetSize(320, 545)
   configFrame:SetPoint("CENTER")
+  configFrame:SetMovable(true)
+  configFrame:SetClampedToScreen(true)
+  configFrame:EnableMouse(true)
+  configFrame:RegisterForDrag("LeftButton")
+  configFrame:SetScript("OnDragStart", configFrame.StartMoving)
+  configFrame:SetScript("OnDragStop", configFrame.StopMovingOrSizing)
   configFrame:Hide()
 
   local title = configFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  title:SetPoint("TOPLEFT", 12, -8)
+  if configFrame.TitleBg then
+    title:SetPoint("LEFT", configFrame.TitleBg, "LEFT", 8, 0)
+  else
+    title:SetPoint("TOPLEFT", 12, -8)
+  end
   title:SetText("Angler's Pocket")
 
   local info = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   info:SetPoint("TOPLEFT", 12, -30)
-  info:SetWidth(260)
+  info:SetWidth(290)
   info:SetJustifyH("LEFT")
+
+  local function CreateHeader(text)
+    local header = configFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    header:SetText(text)
+    return header
+  end
+
+  local generalHeader = CreateHeader("General")
+  generalHeader:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 2, -4)
 
   local unlock = CreateCheckbox(configFrame, "Unlock button", function(checked)
     SetLocked(not checked)
   end)
-  unlock:SetPoint("TOPLEFT", info, "BOTTOMLEFT", -4, -6)
+  unlock:SetPoint("TOPLEFT", generalHeader, "BOTTOMLEFT", 4, -2)
+
+  local loginMessageCheck = CreateCheckbox(configFrame, "Show chat message at login", function(checked)
+    db.loginMessage = checked
+  end)
+  loginMessageCheck:SetPoint("TOPLEFT", unlock, "BOTTOMLEFT", 0, 2)
+
+  local buttonHeader = CreateHeader("Button")
+  buttonHeader:SetPoint("TOPLEFT", loginMessageCheck, "BOTTOMLEFT", -4, -8)
+
+  local sizeSlider = CreateSlider(configFrame, "Button size", SIZE_MIN, SIZE_MAX, SIZE_STEP, tostring, function(value)
+    db.size = value
+    ApplyLayout()
+  end)
+  sizeSlider:SetPoint("TOPLEFT", buttonHeader, "BOTTOMLEFT", 10, -22)
+
+  local baitLabel = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  baitLabel:SetPoint("TOPLEFT", sizeSlider, "BOTTOMLEFT", 0, -14)
+  baitLabel:SetText("Bait position:")
 
   local glowCheck = CreateCheckbox(configFrame, "Highlight baits when none is applied", function(checked)
     db.baitGlow = checked
     UpdateBaitTimer()
   end)
-  glowCheck:SetPoint("TOPLEFT", unlock, "BOTTOMLEFT", 0, 2)
+  glowCheck:SetPoint("TOPLEFT", baitLabel, "BOTTOMLEFT", -6, -10)
 
-  local horizontalCheck = CreateCheckbox(configFrame, "Show baits beside the button", function(checked)
-    db.horizontal = checked
-    ApplyLayout()
-  end)
-  horizontalCheck:SetPoint("TOPLEFT", glowCheck, "BOTTOMLEFT", 0, 2)
+  local fishingHeader = CreateHeader("Fishing")
+  fishingHeader:SetPoint("TOPLEFT", glowCheck, "BOTTOMLEFT", -4, -8)
 
   local keyLabel = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  keyLabel:SetPoint("TOPLEFT", horizontalCheck, "BOTTOMLEFT", 6, -12)
+  keyLabel:SetPoint("TOPLEFT", fishingHeader, "BOTTOMLEFT", 10, -14)
   keyLabel:SetText("Cast key:")
+
+  local autoLootCheck = CreateCheckbox(configFrame, "Auto loot with pole equipped", function(checked)
+    db.autoLoot = checked
+    UpdateAutoLoot()
+  end)
+  autoLootCheck:SetPoint("TOPLEFT", keyLabel, "BOTTOMLEFT", -6, -10)
+
+  local buttonOffset = math.max(keyLabel:GetStringWidth(), baitLabel:GetStringWidth()) + 8
 
   local keyButton = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
   keyButton:SetSize(150, 22)
-  keyButton:SetPoint("LEFT", keyLabel, "RIGHT", 8, 0)
+  keyButton:SetPoint("LEFT", keyLabel, "LEFT", buttonOffset, 0)
   keyButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+  local baitDropdown = CreateFrame("DropdownButton", nil, configFrame, "WowStyle1DropdownTemplate")
+  baitDropdown:SetWidth(150)
+  baitDropdown:SetPoint("LEFT", baitLabel, "LEFT", buttonOffset, 0)
+
+  local baitEntries = {}
+  for _, direction in ipairs(BAIT_DIRECTIONS) do
+    baitEntries[#baitEntries + 1] = { direction.label, direction.key }
+  end
+
+  MenuUtil.CreateRadioMenu(baitDropdown, function(key)
+    return db.baitDirection == key
+  end, function(key)
+    db.baitDirection = key
+    ApplyLayout()
+  end, unpack(baitEntries))
 
   local function StopKeyCapture()
     keyButton.capturing = false
@@ -721,15 +818,8 @@ local function CreateConfigFrame()
     GameTooltip:Hide()
   end)
 
-  local sizeSlider = CreateSlider(configFrame, "Button size", SIZE_MIN, SIZE_MAX, SIZE_STEP, tostring, function(value)
-    db.size = value
-    ApplyLayout()
-  end)
-  sizeSlider:SetPoint("TOPLEFT", keyLabel, "BOTTOMLEFT", 0, -28)
-
-  local soundHeader = configFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  soundHeader:SetPoint("TOPLEFT", sizeSlider, "BOTTOMLEFT", 0, -16)
-  soundHeader:SetText("Sound while fishing")
+  local soundHeader = CreateHeader("Sound while fishing")
+  soundHeader:SetPoint("TOPLEFT", autoLootCheck, "BOTTOMLEFT", -4, -8)
 
   local soundSliders = {}
   local function UpdateSoundSlidersAlpha()
@@ -738,12 +828,12 @@ local function CreateConfigFrame()
     end
   end
 
-  local soundCheck = CreateCheckbox(configFrame, "Adjust volumes while a pole is equipped", function(checked)
+  local soundCheck = CreateCheckbox(configFrame, "Adjust volumes with pole equipped", function(checked)
     db.fishingSound.enabled = checked
     UpdateSoundSlidersAlpha()
     UpdateFishingSound()
   end)
-  soundCheck:SetPoint("TOPLEFT", soundHeader, "BOTTOMLEFT", -6, -2)
+  soundCheck:SetPoint("TOPLEFT", soundHeader, "BOTTOMLEFT", 4, -2)
 
   local anchor = soundCheck
   for index, entry in ipairs(SOUND_SETTINGS) do
@@ -751,7 +841,7 @@ local function CreateConfigFrame()
       db.fishingSound[entry.key] = value / 100
       UpdateFishingSound()
     end)
-    slider:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", index == 1 and 6 or 0, -20)
+    slider:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", index == 1 and 6 or 0, -23)
     slider.settingKey = entry.key
     soundSliders[#soundSliders + 1] = slider
     anchor = slider
@@ -776,7 +866,9 @@ local function CreateConfigFrame()
   configFrame:SetScript("OnShow", function()
     unlock:SetChecked(not db.locked)
     glowCheck:SetChecked(db.baitGlow)
-    horizontalCheck:SetChecked(db.horizontal)
+    baitDropdown:GenerateMenu()
+    autoLootCheck:SetChecked(db.autoLoot)
+    loginMessageCheck:SetChecked(db.loginMessage)
     StopKeyCapture()
     sizeSlider:SetValueSilently(db.size)
     soundCheck:SetChecked(db.fishingSound.enabled)
@@ -843,6 +935,10 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
     UpdateButton()
     UpdateBaitButtons()
     UpdateFishingSound()
+    UpdateAutoLoot()
+    if event == "PLAYER_LOGIN" and db.loginMessage then
+      print("Angler's Pocket loaded. Type /ap for options.")
+    end
     return
   end
 
@@ -852,12 +948,14 @@ events:SetScript("OnEvent", function(_, event, arg1, ...)
       UpdateButton()
       UpdateBaitButtons()
       UpdateFishingSound()
+      UpdateAutoLoot()
     end
     return
   end
 
   if event == "PLAYER_LOGOUT" then
     UpdateFishingSound(true)
+    UpdateAutoLoot(true)
     return
   end
 
